@@ -1,132 +1,158 @@
 import pandas as pd
+import numpy as np
 import re
 import os
-import sys
 
-current_folder = os.path.dirname(os.path.abspath(__file__))
-FILE_BOA = os.path.join(current_folder, "du_lieu_huan_luyen.csv")
-FILE_EPEAT = os.path.join(current_folder, "du_lieu_thuc_te.csv")
-
-print(f">>> Processing in: {current_folder}")
-
+# --- 1. CONFIGURATION ---
+FOLDER_PATH = r"D:\NCKH\nckh20252026\dataset_code"
 try:
-    if not os.path.exists(FILE_BOA) or not os.path.exists(FILE_EPEAT):
-        print("ERROR: CSV files not found.")
-        sys.exit()
-    df_boa = pd.read_csv(FILE_BOA)
-    df_epeat = pd.read_csv(FILE_EPEAT)
-    print(">>> Files read successfully!")
-except Exception as e:
-    print(f"Error: {e}")
-    sys.exit()
+    os.chdir(FOLDER_PATH)
+    print(f"[OK] Working directory changed to: {os.getcwd()}")
+except FileNotFoundError:
+    print(f"[ERROR] Directory not found: {FOLDER_PATH}")
+    print("-> Please check the FOLDER_PATH variable.")
+    exit()
 
-def normalize_name(name):
-    if not isinstance(name, str): return str(name)
-    name = name.lower()
-    for word in ['notebook', 'laptop', 'desktop', 'workstation', 'inc.', 'corp.', 'ltd', 'fusion']:
+# --- 2. HELPER FUNCTIONS ---
+def normalize_model_name(name):
+    """Normalize model name for matching."""
+    if pd.isna(name): return ""
+    name = str(name).lower()
+    remove_words = ['notebook', 'laptop', 'smartphone', 'tablet', 'mobile', 'inch', 'gb', 'tb', 'wifi', '5g', '4g', 'series']
+    for word in remove_words:
         name = name.replace(word, '')
     name = re.sub(r'[^a-z0-9]', '', name)
     return name
 
-df_boa['match_key'] = df_boa['name'].apply(normalize_name)
-df_epeat['match_key'] = df_epeat['Device Name'].apply(normalize_name)
+def extract_features(row):
+    """Extract Year and Screen Size from Model Name."""
+    name = str(row['Model_Original']).lower()
+    
+    # Extract Year (e.g., 2021)
+    year_match = re.search(r'20(1[0-9]|2[0-5])', name)
+    year = int(year_match.group(0)) if year_match else np.nan
+    
+    # Extract Screen Size (e.g., 14 inch)
+    screen_match = re.search(r'(\d{2}(\.\d)?)\s?inch', name)
+    screen = float(screen_match.group(1)) if screen_match else np.nan
+    
+    return pd.Series([year, screen])
 
-print(">>> Merging data...")
-df_merged = pd.merge(df_boa, df_epeat, on='match_key', how='outer', suffixes=('_BOA', '_EPEAT'))
+# --- 3. LOAD & MERGE DATA ---
+print("... Loading and merging data files")
+try:
+    # Load raw CSVs
+    df_boa = pd.read_csv('boavizta-data-us.csv')
+    df_energy = pd.read_csv('ENERGY_STAR_Certified_Computers_V9.0.csv')
+    df_laptop = pd.read_csv('laptop.csv')
+    df_phone = pd.read_csv('smartphone.csv')
+    df_tablet = pd.read_csv('tablet.csv')
+    df_real = pd.read_csv('du_lieu_thuc_te.csv')
 
-def clean_ram(value):
-    if pd.isna(value): return 8.0
-    str_val = str(value).upper().strip()
-    try:
-        float_val = float(value)
-        if 1 <= float_val <= 512: 
-            return float_val
-    except:
-        pass
-    match_gb = re.search(r'(\d+(\.\d+)?)\s*GB', str_val)
-    if match_gb: return float(match_gb.group(1))
-    match_mb = re.search(r'(\d+(\.\d+)?)\s*MB', str_val)
-    if match_mb: return float(match_mb.group(1)) / 1024
-    match_num = re.search(r'^(\d+(\.\d+)?)$', str_val)
-    if match_num:
-        val = float(match_num.group(1))
-        if 1 <= val <= 512: return val
-    return 8.0
+    # Prepare Boavizta (Master Table)
+    df_boa = df_boa[df_boa['category'].isin(['Workplace', 'Smartphone', 'Tablet', 'Laptop'])]
+    df_boa = df_boa[['manufacturer', 'name', 'category', 'gwp_total', 'weight', 'lifetime']]
+    df_boa.columns = ['Brand', 'Model_Original', 'Category', 'Carbon_Footprint', 'Weight_kg', 'Lifetime_Years']
+    df_boa['Match_Key'] = df_boa['Model_Original'].apply(normalize_model_name)
 
-def get_cpu_score(row):
-    full_text = str(row.get('name', '')) + " " + str(row.get('Device Name', '')) + " " + str(row.get('comment', ''))
-    full_text = full_text.upper()
-    if any(x in full_text for x in ['M1', 'M2', 'M3', 'APPLE SILICON', 'ARM', 'SNAPDRAGON']): return 1
-    if any(x in full_text for x in ['CORE I9', 'RYZEN 9', 'RTX', 'GTX', 'GAMING', 'WORKSTATION']): return 3
-    return 2
+    # Prepare Energy Star
+    tec_col = [c for c in df_energy.columns if 'TEC' in c and 'kWh' in c]
+    if tec_col:
+        df_energy = df_energy[['Brand Name', 'Model Name', tec_col[0]]]
+        df_energy.columns = ['Brand_En', 'Model_En', 'Energy_kWh_Year']
+    else:
+        df_energy = df_energy[['Brand Name', 'Model Name']]
+        df_energy['Energy_kWh_Year'] = np.nan
+        print("[WARN] TEC column not found in Energy Star file.")
+        
+    df_energy['Match_Key'] = df_energy['Model_En'].apply(normalize_model_name)
+    df_energy_agg = df_energy.groupby('Match_Key').agg({'Energy_kWh_Year': 'mean'}).reset_index()
 
-def clean_storage(value):
-    if pd.isna(value): return 256.0
-    value = str(value).upper()
-    if 'TB' in value: 
-        match = re.search(r'(\d+)\s*T', value)
-        if match: return float(match.group(1)) * 1024
-    match = re.search(r'(\d+)\s*G', value)
-    if match: return float(match.group(1))
-    return 256.0
+    # Prepare iFixit
+    df_fix = pd.concat([df_laptop, df_phone, df_tablet])
+    df_fix = df_fix[['Manufacturer', 'Model', 'Score']]
+    df_fix.columns = ['Brand_Fix', 'Model_Fix', 'Repair_Score']
+    df_fix['Match_Key'] = df_fix['Model_Fix'].apply(normalize_model_name)
+    df_fix_agg = df_fix.groupby('Match_Key').agg({'Repair_Score': 'mean'}).reset_index()
 
-def clean_screen(value):
-    if pd.isna(value): return 14.0
-    match = re.search(r'(\d+(\.\d+)?)', str(value))
-    if match: 
-        size = float(match.group(1))
-        if 10 <= size <= 40: return size
-    return 14.0
+    # Prepare Real Data
+    df_real = df_real[['Device Name', 'RoHS', 'Recycled %']]
+    df_real.columns = ['Model_Real', 'RoHS_Compliant', 'Recycled_Content_Percent']
+    df_real['Match_Key'] = df_real['Model_Real'].apply(normalize_model_name)
 
-def clean_weight(value):
-    if pd.isna(value): return 1.5
-    match = re.search(r'(\d+(\.\d+)?)', str(value))
-    if match: return float(match.group(1))
-    return 1.5
+    # MERGE ALL
+    df = pd.merge(df_boa, df_energy_agg, on='Match_Key', how='left')
+    df = pd.merge(df, df_fix_agg, on='Match_Key', how='left')
+    df = pd.merge(df, df_real, on='Match_Key', how='left')
 
-print(">>> Extracting specs (Updated RAM logic)...")
-df_merged['CPU_Score'] = df_merged.apply(get_cpu_score, axis=1)
-df_merged['RAM_GB'] = df_merged['memory'].apply(clean_ram)
-df_merged['Storage_GB'] = df_merged['hard_drive'].apply(clean_storage)
-df_merged['Screen_Size_Inch'] = df_merged['screen_size'].apply(clean_screen)
-df_merged['Weight_Kg'] = df_merged['weight'].apply(clean_weight)
+except Exception as e:
+    print(f"[ERROR] File processing error: {e}")
+    exit()
 
-df_merged['Final_Name'] = df_merged['Device Name'].fillna(df_merged['name'])
+# --- 4. SMART PROCESSING (CORE LOGIC) ---
+print("... Performing Smart Processing & Imputation")
 
-def calculate_score(row):
-    if pd.notna(row.get('EPEAT Rank')) and row.get('EPEAT Rank') != 0: return row['EPEAT Rank']
-    gwp = row.get('gwp_total')
-    if pd.notna(gwp):
-        if gwp < 150: return 3
-        elif gwp < 250: return 2
-        else: return 1
-    return 1
+# A. Feature Engineering
+df[['Year_Extracted', 'Screen_Size_Extracted']] = df.apply(extract_features, axis=1)
 
-df_merged['Eco_Score'] = df_merged.apply(calculate_score, axis=1)
+# B. Smart Imputation
+# Default Year to 2021, Screen to 14.0 if missing
+df['Year_Extracted'] = df['Year_Extracted'].fillna(2021)
+df['Screen_Size_Extracted'] = df['Screen_Size_Extracted'].fillna(14.0)
 
-median_energy = df_merged['yearly_tec'].median()
-df_merged['Energy_Consumption_kWh'] = df_merged['yearly_tec'].fillna(median_energy)
+# Fill Weight: Based on Screen Size
+df['Weight_kg'] = df['Weight_kg'].fillna(df.groupby('Screen_Size_Extracted')['Weight_kg'].transform('mean'))
+df['Weight_kg'] = df['Weight_kg'].fillna(1.5) # Final fallback
 
-if 'Recycled %' in df_merged.columns:
-    df_merged['Recycled_Percentage'] = df_merged['Recycled %'].fillna(0)
-else:
-    df_merged['Recycled_Percentage'] = 0
+# Fill Energy: Based on Year and Screen Size
+df['Energy_kWh_Year'] = df['Energy_kWh_Year'].fillna(df.groupby(['Year_Extracted', 'Screen_Size_Extracted'])['Energy_kWh_Year'].transform('mean'))
+df['Energy_kWh_Year'] = df['Energy_kWh_Year'].fillna(30.0) # Final fallback
 
-if 'RoHS' in df_merged.columns:
-    df_merged['RoHS_Compliant'] = df_merged['RoHS'].fillna(1)
-else:
-    df_merged['RoHS_Compliant'] = 1
+# Fill others
+df['Repair_Score'] = df['Repair_Score'].fillna(6.0)
+df['RoHS_Compliant'] = df['RoHS_Compliant'].fillna(1)
+df['Recycled_Content_Percent'] = df['Recycled_Content_Percent'].fillna(0)
 
-final_cols = [
-    'Final_Name', 'Energy_Consumption_kWh', 'Recycled_Percentage', 'RoHS_Compliant',
-    'Screen_Size_Inch', 'Weight_Kg', 'RAM_GB', 'Storage_GB', 'CPU_Score', 'Eco_Score'
-]
-df_final = df_merged[final_cols].rename(columns={'Final_Name': 'Device_Name'})
+# C. Calculate Target "Ground Truth" (Eco_Score)
+def calculate_target(row):
+    # Carbon (Standard: 500kg = 0 points)
+    co2 = row['Carbon_Footprint'] if not pd.isna(row['Carbon_Footprint']) else 250
+    score_co2 = max(0, 100 - (co2 / 5))
+    
+    # Energy (Standard: 100kWh = 0 points)
+    energy = row['Energy_kWh_Year']
+    score_energy = max(0, 100 - energy)
+    
+    # Repair (Scale 10 -> 100)
+    score_repair = row['Repair_Score'] * 10
+    
+    # Material
+    score_mat = row['Recycled_Content_Percent'] + (10 if row['RoHS_Compliant'] else 0)
+    score_mat = min(100, score_mat)
+    
+    # Weighted Formula
+    return (0.4 * score_co2) + (0.3 * score_energy) + (0.2 * score_repair) + (0.1 * score_mat)
 
-output_file = os.path.join(current_folder, "FULL_SPECS_CPU_DATASET.csv")
-df_final.to_csv(output_file, index=False)
+df['Eco_Score_Target'] = df.apply(calculate_target, axis=1)
 
-print(f"\n>>> DONE! File saved: {output_file}")
+# --- 5. SAVE FINAL DATASET ---
+train_df = df[[
+    'Model_Original',        # For Lookup
+    'Brand',                 # Input Feature
+    'Year_Extracted',        # Input Feature
+    'Screen_Size_Extracted', # Input Feature
+    'Weight_kg',             # Input Feature
+    'Energy_kWh_Year',       # Input Feature
+    'Repair_Score',          # Input Feature
+    'Eco_Score_Target'       # TARGET LABEL
+]]
 
-print("\n--- RAM DISTRIBUTION CHECK ---")
-print(df_final['RAM_GB'].value_counts())
+output_file = 'Optimized_Dataset_for_AI.csv'
+train_df.to_csv(output_file, index=False)
+
+print("="*60)
+print(f"[SUCCESS] Dataset created: {os.path.join(FOLDER_PATH, output_file)}")
+print("This dataset is ready for training Random Forest.")
+print(f"Total rows: {len(train_df)}")
+print(train_df.head())
+print("="*60)

@@ -1,85 +1,85 @@
 import pandas as pd
-import joblib
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import os
-import sys
+import joblib
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import r2_score, mean_absolute_error
 
-# --- CẤU HÌNH ---
-DATASET_FILE = 'dataset.csv'
-MODEL_FILE = 'eco_model_final.pkl'
+# ==============================================================================
+# CAU HINH
+# ==============================================================================
+WORK_DIR = r"D:\NCKH\nckh20252026\training"
+INPUT_FILE = 'Optimized_Dataset_for_AI.csv'
+OUTPUT_MODEL = 'eco_ai_model.pkl'
+OUTPUT_ENCODER = 'brand_encoder.pkl'
 
-print(f">>> Reading data from: {DATASET_FILE}...")
+# ==============================================================================
+# CHUONG TRINH CHINH
+# ==============================================================================
+if __name__ == "__main__":
+    # 1. Thiet lap thu muc
+    try:
+        os.chdir(WORK_DIR)
+        print(f"[OK] Working Directory: {WORK_DIR}")
+    except FileNotFoundError:
+        print(f"[LOI] Khong tim thay thu muc: {WORK_DIR}")
+        exit()
 
-# 1. LOAD DATA
-try:
-    current_folder = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(current_folder, DATASET_FILE)
-    if not os.path.exists(file_path):
-        print(f"ERROR: File not found at {file_path}")
-        sys.exit()
-    df = pd.read_csv(file_path)
-    print(f">>> Successfully loaded {len(df)} rows.")
-except Exception as e:
-    print(f"Error: {e}")
-    sys.exit()
+    # 2. Doc file dataset da co san
+    if not os.path.exists(INPUT_FILE):
+        print(f"[LOI] Khong tim thay file '{INPUT_FILE}'")
+        print("-> Vui long kiem tra lai ten file hoac chay code tao data truoc.")
+        exit()
+        
+    print(f"... Dang doc du lieu tu: {INPUT_FILE}")
+    df = pd.read_csv(INPUT_FILE)
+    print(f"[OK] Da tai {len(df)} dong du lieu.")
 
-# 2. FEATURE ENGINEERING (TẠO ĐẶC TRƯNG THÔNG MINH)
-# Dạy AI hiểu bản chất vật lý thay vì học vẹt con số
-# Hiệu suất năng lượng: kWh trên mỗi inch màn hình
-df['Energy_Efficiency'] = df['Energy_Consumption_kWh'] / df['Screen_Size_Inch']
-# Mật độ vật liệu: Kg trên mỗi inch màn hình
-df['Material_Density'] = df['Weight_Kg'] / df['Screen_Size_Inch']
+    # 3. Tien xu ly (Preprocessing)
+    print("... Dang chuan bi du lieu training")
+    
+    # Ma hoa Brand (Dell -> 1, Apple -> 2...)
+    le = LabelEncoder()
+    # Chuyen ve string de tranh loi neu co so lan trong ten hang
+    df['Brand_Encoded'] = le.fit_transform(df['Brand'].astype(str))
 
-# Xử lý lỗi chia cho 0 (nếu có)
-df.replace([np.inf, -np.inf], 0, inplace=True)
-df.fillna(0, inplace=True)
+    # Chon cac cot Dau vao (Features) va Dau ra (Target)
+    features = ['Brand_Encoded', 'Year_Extracted', 'Screen_Size_Extracted', 'Weight_kg', 'Energy_kWh_Year', 'Repair_Score']
+    target = 'Eco_Score_Target'
 
-# 3. CHỌN CÁC CỘT (Input Features)
-# Bây giờ chúng ta có 10 cột đặc trưng
-feature_cols = [
-    'Energy_Consumption_kWh', 
-    'Recycled_Percentage', 
-    'RoHS_Compliant', 
-    'Screen_Size_Inch', 
-    'Weight_Kg', 
-    'RAM_GB', 
-    'Storage_GB', 
-    'CPU_Score',
-    'Energy_Efficiency', # <--- Cột mới 1
-    'Material_Density'   # <--- Cột mới 2
-]
+    # Kiem tra xem file csv co du cot khong
+    missing_cols = [col for col in features + [target] if col not in df.columns]
+    if missing_cols:
+        print(f"[LOI] File CSV thieu cac cot sau: {missing_cols}")
+        print("-> File dataset cua ban khong dung chuan. Hay tao lai dataset.")
+        exit()
 
-X = df[feature_cols]
-y = df['Eco_Score']
+    X = df[features]
+    y = df[target]
 
-# 4. CHIA TẬP TRAIN/TEST
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # Chia tap Train/Test
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# 5. HUẤN LUYỆN (CHẾ ĐỘ ỔN ĐỊNH - KHÔNG SMOTE)
-print(f">>> Training Realistic Smart Model...")
-model = RandomForestClassifier(
-    n_estimators=300,       # Số lượng cây quyết định
-    max_depth=None,         # Để cây phát triển tự nhiên tối đa
-    min_samples_leaf=1,     # Học chi tiết nhất có thể
-    random_state=42
-)
-model.fit(X_train, y_train)
+    # 4. Train Model
+    print("... Dang train Random Forest")
+    model = RandomForestRegressor(n_estimators=200, max_depth=15, random_state=42)
+    model.fit(X_train, y_train)
 
-# 6. ĐÁNH GIÁ KẾT QUẢ
-y_pred = model.predict(X_test)
-acc = accuracy_score(y_test, y_pred)
+    # 5. Danh gia
+    y_pred = model.predict(X_test)
+    r2 = r2_score(y_test, y_pred)
+    mae = mean_absolute_error(y_test, y_pred)
 
-print(f"\n>>> FINAL ACCURACY: {acc * 100:.2f}%")
-print("-" * 30)
-print(classification_report(y_test, y_pred))
+    print("-" * 30)
+    print(f"KET QUA TRAINING:")
+    print(f"-> Do chinh xac (R2): {r2:.4f}")
+    print(f"-> Sai so trung binh (MAE): {mae:.2f} diem")
+    print("-" * 30)
 
-print("\nConfusion Matrix:")
-print(confusion_matrix(y_test, y_pred))
-
-# 7. LƯU MODEL
-output_path = os.path.join(current_folder, MODEL_FILE)
-joblib.dump(model, output_path)
-print(f"\n>>> DONE! Smart Model saved to: {output_path}")
+    # 6. Luu Model
+    joblib.dump(model, OUTPUT_MODEL)
+    joblib.dump(le, OUTPUT_ENCODER)
+    print(f"[THANH CONG] Da luu model: {OUTPUT_MODEL}")
+    print(f"[THANH CONG] Da luu encoder: {OUTPUT_ENCODER}")
